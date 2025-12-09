@@ -1,0 +1,65 @@
+# ---- Inputs ----
+$TargetObjectId       = "ManagedIdentityObjectID"     
+$StorageResourceGroup = "RG"
+$StorageAccountName   = "SAName"
+$ContainerName        = "Containername"    
+
+#Install Microsoft Graph SDK
+Install-Module Microsoft.Graph -Scope CurrentUser -Force
+
+#Import the submodule that contains the cmdlet
+Import-Module Microsoft.Graph.Reports
+
+# Sign in
+Connect-MgGraph -Scopes "AuditLog.Read.All"
+Connect-AzAccount
+
+# Today's UTC window
+$startUtc = (Get-Date).Date.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$endUtc   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+# OData filter: NO quotes around the DateTimeOffset values
+$filter = "targetResources/any(t:t/id eq '$TargetObjectId') and activityDateTime ge $startUtc and activityDateTime le $endUtc"
+
+# Pull logs (no extra logic)
+$logs = Get-MgAuditLogDirectoryAudit -Filter $filter -All
+
+# ---- Build custom rows in your exact column order ----
+$rows = foreach ($log in $logs) {
+    $additionalDetailsJson = if ($log.AdditionalDetails) { ($log.AdditionalDetails | ConvertTo-Json -Depth 6 -Compress) } else { $null }
+    $initiatedByJson       = if ($log.InitiatedBy)       { ($log.InitiatedBy       | ConvertTo-Json -Depth 6 -Compress) } else { $null }
+    $targetResourcesJson   = if ($log.TargetResources)   {
+        ($log.TargetResources |
+            Select-Object Id, Type, DisplayName, UserPrincipalName, GroupType, ModifiedProperties |
+            ConvertTo-Json -Depth 6 -Compress)
+    } else { $null }
+    $additionalPropsJson   = if ($log.AdditionalProperties) { ($log.AdditionalProperties | ConvertTo-Json -Depth 6 -Compress) } else { $null }
+
+    [PSCustomObject]@{
+        ActivityDateTime      = $log.ActivityDateTime
+        ActivityDisplayName   = $log.ActivityDisplayName
+        AdditionalDetails     = $additionalDetailsJson
+        Category              = $log.Category
+        CorrelationId         = $log.CorrelationId
+        Id                    = $log.Id
+        InitiatedBy           = $initiatedByJson
+        LoggedByService       = $log.LoggedByService
+        OperationType         = $log.OperationType
+        Result                = $log.Result
+        ResultReason          = $log.ResultReason
+        TargetResources       = $targetResourcesJson
+        AdditionalProperties  = $additionalPropsJson
+    }
+}
+
+# ---- Write CSV to current directory (flat path) ----
+$stamp    = Get-Date -Format "yyyyMMdd-HHmmss"
+$localCsv = "Managed_ID_PermissionsAudit-$stamp.csv"
+$rows | Export-Csv -Path $localCsv -NoTypeInformation -Encoding UTF8
+
+# ---- Upload to Storage (flat blob name; assumes container exists) ----
+$ctx  = (Get-AzStorageAccount -ResourceGroupName $StorageResourceGroup -Name $StorageAccountName).Context
+$blob = "Managed_ID_PermissionsAudit-$stamp.csv"
+
+Set-AzStorageBlobContent -Context $ctx -Container $ContainerName -File $localCsv -Blob $blob -Force | Out-Null
+Write-Host "Uploaded: https://$StorageAccountName.blob.core.windows.net/$ContainerName/$blob"
